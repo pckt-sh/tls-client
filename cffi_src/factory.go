@@ -401,6 +401,17 @@ func getTlsClient(requestInput RequestInput, sessionId string, withSession bool)
 		options = append(options, tls_client.WithLocalAddr(*localAddr))
 	}
 
+	if len(requestInput.LocalAddressIPv6CIDRs) > 0 {
+		options = append(options, tls_client.WithLocalAddrFromIPv6CIDRs(requestInput.LocalAddressIPv6CIDRs...))
+	}
+
+	if requestInput.WithDNSCache {
+		// One cache for the whole library: sessions come and go, and a
+		// cache of its own would be empty for the one connection most of
+		// them make.
+		options = append(options, tls_client.WithDNSCache(tls_client.DefaultDNSCache))
+	}
+
 	if requestInput.CatchPanics {
 		options = append(options, tls_client.WithCatchPanics())
 	}

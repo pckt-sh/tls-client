@@ -56,6 +56,7 @@ type RequestInput struct {
 	DefaultHeaders              map[string][]string `json:"defaultHeaders"`
 	ConnectHeaders              map[string][]string `json:"connectHeaders"`
 	LocalAddress                *string             `json:"localAddress"`
+	LocalAddressIPv6CIDRs       []string            `json:"localAddressIPv6Cidrs"`
 	ServerNameOverwrite         *string             `json:"serverNameOverwrite"`
 	ProxyUrl                    *string             `json:"proxyUrl"`
 	RequestBody                 *string             `json:"requestBody"`
@@ -84,6 +85,7 @@ type RequestInput struct {
 	DisableIPV6                 bool                `json:"disableIPV6"`
 	DisableIPV4                 bool                `json:"disableIPV4"`
 	WithDebug                   bool                `json:"withDebug"`
+	WithDNSCache                bool                `json:"withDnsCache"`
 	WithCustomCookieJar         bool                `json:"withCustomCookieJar"`
 	WithoutCookieJar            bool                `json:"withoutCookieJar"`
 	WithRandomTLSExtensionOrder bool                `json:"withRandomTLSExtensionOrder"`

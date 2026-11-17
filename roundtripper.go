@@ -29,8 +29,6 @@ const CHROME_MAX_FIELD_SECTION_SIZE = 262144
 // utls and the ones of the profiles in this module.
 const firefoxClientName = "Firefox"
 
-var errProtocolNegotiated = errors.New("protocol negotiated")
-
 type roundTripper struct {
 	initialStreamID   uint32
 	allowHTTP         bool
@@ -74,7 +72,10 @@ type roundTripper struct {
 	sync.Mutex
 
 	cachedTransportsLck sync.Mutex
-	connectionFlow      uint32
+	// pendingTransports holds, per address, a channel closed once the setup
+	// dial in flight for it is over. Guarded by cachedTransportsLck.
+	pendingTransports map[string]chan struct{}
+	connectionFlow    uint32
 
 	forceHttp1   bool
 	disableHttp3 bool
@@ -398,20 +399,83 @@ func (rt *roundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 // transportFor returns the cached transport for addr, building it if missing,
 // and the connection the setup dial stashed (nil if none).
-func (rt *roundTripper) transportFor(req *http.Request, addr string) (t http.RoundTripper, stashed net.Conn, err error) {
-	rt.cachedTransportsLck.Lock()
-	defer rt.cachedTransportsLck.Unlock()
+//
+// The setup dial runs without cachedTransportsLck. Holding it there made the
+// first request to one host, dial and handshake included, block every request
+// on the client, even those to hosts whose transport was long cached.
+// Concurrent first requests to the same host wait for one setup dial instead of
+// each making their own.
+func (rt *roundTripper) transportFor(req *http.Request, addr string) (http.RoundTripper, net.Conn, error) {
+	for {
+		rt.cachedTransportsLck.Lock()
+		if t, ok := rt.cachedTransports[addr]; ok {
+			rt.cachedTransportsLck.Unlock()
+			return t, nil, nil
+		}
 
-	if t, ok := rt.cachedTransports[addr]; ok {
-		return t, nil, nil
+		pending, building := rt.pendingTransports[addr]
+		if !building {
+			done := make(chan struct{})
+			rt.pendingTransports[addr] = done
+			rt.cachedTransportsLck.Unlock()
+
+			return rt.buildPendingTransport(req, addr, done)
+		}
+		rt.cachedTransportsLck.Unlock()
+
+		// Whatever the outcome, look again: a failed setup dial may have failed
+		// for reasons of its own request, its context for one, so a waiter makes
+		// its own attempt rather than inheriting the error.
+		select {
+		case <-pending:
+		case <-req.Context().Done():
+			return nil, nil, req.Context().Err()
+		}
 	}
+}
 
-	stashed, err = rt.getTransport(req, addr)
+// buildPendingTransport makes the setup dial for addr on behalf of every
+// request waiting on done, caches the transport and releases the waiters. The
+// release is deferred so a panic in the dialer cannot leave them waiting.
+func (rt *roundTripper) buildPendingTransport(req *http.Request, addr string, done chan struct{}) (t http.RoundTripper, stashed net.Conn, err error) {
+	var built builtTransport
+	var ok, lost bool
+
+	defer func() {
+		rt.cachedTransportsLck.Lock()
+		delete(rt.pendingTransports, addr)
+
+		// ok rather than err == nil: a panic in the dialer leaves err nil and
+		// built empty, and caching that would hand the next request a nil
+		// transport.
+		if ok {
+			// The racer caches transports under the same lock without consulting
+			// pendingTransports, so one may have landed in the meantime. Others may
+			// already use it, so it wins.
+			if existing, ok := rt.cachedTransports[addr]; ok {
+				t, stashed, lost = existing, nil, true
+			} else {
+				rt.installTransport(addr, built)
+			}
+		}
+		rt.cachedTransportsLck.Unlock()
+		close(done)
+
+		if lost {
+			if built.stashed != nil {
+				rt.discardStash(addr, built.stashed)
+			}
+			closeTransport(built.transport)
+		}
+	}()
+
+	built, err = rt.buildTransport(req, addr)
 	if err != nil {
 		return nil, nil, err
 	}
+	ok = true
 
-	return rt.cachedTransports[addr], stashed, nil
+	return built.transport, built.stashed, nil
 }
 
 // discardStash closes stashed if the transport never took it, e.g. because it
@@ -426,71 +490,190 @@ func (rt *roundTripper) discardStash(addr string, stashed net.Conn) {
 	}
 }
 
+// builtTransport is a transport made by a setup dial, not yet cached.
+type builtTransport struct {
+	transport http.RoundTripper
+	kind      transportKind
+	// hasKind is false for plain http, whose transport never dials through
+	// dialTLS and so never compares kinds.
+	hasKind bool
+	// stashed is the connection the setup dial left for the transport's first
+	// dial, nil for plain http.
+	stashed net.Conn
+}
+
+// installTransport caches built for addr. The caller holds cachedTransportsLck.
+func (rt *roundTripper) installTransport(addr string, built builtTransport) {
+	rt.cachedTransports[addr] = built.transport
+	if built.hasKind {
+		rt.setCachedKind(addr, built.kind)
+	}
+}
+
 // getTransport builds and caches the transport for addr. For https it does so
 // with a setup dial and returns the connection that dial stashed for the
-// transport's first dial.
+// transport's first dial. The caller holds cachedTransportsLck.
 func (rt *roundTripper) getTransport(req *http.Request, addr string) (net.Conn, error) {
+	built, err := rt.buildTransport(req, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	rt.installTransport(addr, built)
+
+	return built.stashed, nil
+}
+
+// buildTransport makes the transport for addr without caching it, so it needs
+// no lock: for https that is a setup dial, whose handshake picks the protocol.
+func (rt *roundTripper) buildTransport(req *http.Request, addr string) (builtTransport, error) {
 	switch strings.ToLower(req.URL.Scheme) {
 	case "http":
-		rt.cachedTransports[addr] = rt.buildHttp1Transport()
-		return nil, nil
+		return builtTransport{transport: rt.buildHttp1Transport()}, nil
 	case "https":
 	default:
-		return nil, fmt.Errorf("invalid URL scheme: [%v]", req.URL.Scheme)
+		return builtTransport{}, fmt.Errorf("invalid URL scheme: [%v]", req.URL.Scheme)
 	}
 
-	conn, err := rt.dialTLSSetup(req.Context(), "tcp", addr)
-	if errors.Is(err, errProtocolNegotiated) {
-		return conn, nil
-	}
-	if err == nil {
-		_ = conn.Close()
-
-		return nil, fmt.Errorf("tls-client: setup dial for %s returned a connection without building a transport", addr)
-	}
-
-	return nil, err
+	return rt.dialTLSSetup(req.Context(), "tcp", addr)
 }
 
 // dialTLS is the transport's own DialTLSContext, so it runs whenever a cached
 // transport opens a replacement connection. RoundTrip has released
 // cachedTransportsLck by then, so this path must not write cachedTransports.
 func (rt *roundTripper) dialTLS(ctx context.Context, network, addr string) (net.Conn, error) {
-	return rt.dialTLSWithSetup(ctx, network, addr, false)
-}
-
-// dialTLSSetup is the first dial for an address, made by getTransport while the
-// caller holds cachedTransportsLck. It is the only path allowed to put a
-// transport in the cache. Returns the stashed connection with errProtocolNegotiated.
-func (rt *roundTripper) dialTLSSetup(ctx context.Context, network, addr string) (net.Conn, error) {
-	return rt.dialTLSWithSetup(ctx, network, addr, true)
-}
-
-// dialTLSWithSetup does the dial and the handshake for both.
-//
-// setup says whether the caller holds cachedTransportsLck, and so whether this
-// may build a transport and cache it. Every other caller reaches here from
-// inside a transport's own RoundTrip, on a goroutine of the transport's making,
-// with no lock held at all: writing the map there raced with the read in
-// RoundTrip, on two different mutexes.
-func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr string, setup bool) (net.Conn, error) {
 	// Transports dial the punycode form of internationalized hosts.
 	addr = dialAddr(addr)
 
+	if conn := rt.takeStash(addr); conn != nil {
+		return conn, nil
+	}
+
+	conn, err := rt.handshake(ctx, network, addr)
+	if err != nil {
+		return nil, err
+	}
+
+	negotiatedProtocol := conn.ConnectionState().NegotiatedProtocol
+
+	// A reconnect belongs to a transport that already exists, so it never builds
+	// one: it either hands the connection back or reports that the connection is
+	// unusable.
+	//
+	// Servers do change their mind: an address behind a load balancer can offer
+	// http/1.1 on one connection and h2 on the next. Handing the new connection to
+	// the cached transport regardless means an HTTP/1 transport reading an HTTP/2
+	// SETTINGS frame as if it were a status line, which fails with a "malformed
+	// HTTP response" naming the raw frame bytes and keeps failing for that address
+	// until the whole client is thrown away.
+	//
+	// Neither case can be rescued here, because the dial belongs to the transport
+	// that speaks the wrong protocol and this function does not hold the lock that
+	// guards cachedTransports. Report it and let RoundTrip drop the entry and
+	// rebuild through getTransport.
+	cachedKind, ok := rt.cachedKind(addr)
+	switch {
+	case ok && cachedKind == kindForProtocol(negotiatedProtocol):
+		return conn, nil
+	case ok:
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("%w: %s negotiated %q", errProtocolChanged, addr, negotiatedProtocol)
+	default:
+		// The entry was dropped while this transport was still in flight.
+		_ = conn.Close()
+
+		return nil, fmt.Errorf("%w: %s negotiated %q with no transport cached", errProtocolChanged, addr, negotiatedProtocol)
+	}
+}
+
+// takeStash removes and returns the connection stashed for addr, if any.
+func (rt *roundTripper) takeStash(addr string) net.Conn {
 	rt.Lock()
 	defer rt.Unlock()
 
-	// A stash found by a setup dial is stale.
-	if conn := rt.cachedConnections[addr]; conn != nil {
+	conn := rt.cachedConnections[addr]
+	if conn != nil {
 		delete(rt.cachedConnections, addr)
+	}
 
-		if !setup {
-			return conn, nil
-		}
+	return conn
+}
 
+// stash leaves conn for the next dial to addr, closing a stash it replaces.
+func (rt *roundTripper) stash(addr string, conn net.Conn) {
+	rt.Lock()
+	old := rt.cachedConnections[addr]
+	rt.cachedConnections[addr] = conn
+	rt.Unlock()
+
+	if old != nil && old != conn {
+		_ = old.Close()
+	}
+}
+
+// dialTLSSetup is the first dial for an address. It builds the transport that
+// fits the protocol the handshake negotiated and stashes the connection for
+// that transport's first dial. The caller caches the transport.
+//
+// The setup dial always builds, and deliberately does not consult cachedKinds.
+// It only runs when no transport is cached, so there is nothing to reuse, and a
+// kind left behind by a drop that has not finished would otherwise hand the
+// connection back without a transport.
+func (rt *roundTripper) dialTLSSetup(ctx context.Context, network, addr string) (builtTransport, error) {
+	// Transports dial the punycode form of internationalized hosts.
+	addr = dialAddr(addr)
+
+	// A stash found by a setup dial is stale.
+	if conn := rt.takeStash(addr); conn != nil {
 		_ = conn.Close()
 	}
 
+	// The connection outlives the request that happened to need it first: the
+	// transport serves every later request to addr on it. So the request's
+	// context only governs the dial while it runs, and is cut loose once the
+	// dial is over. A tunnel through an HTTP/2 proxy is a stream that lives as
+	// long as the context it was dialed with, and used to be reset as soon as
+	// the first response had been read, costing the second request a new
+	// tunnel and a new handshake.
+	dialCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, cancel)
+
+	conn, err := rt.handshake(dialCtx, network, addr)
+	if !stop() {
+		// ctx ended while the dial ran, and has cancelled dialCtx.
+		if err == nil {
+			_ = conn.Close()
+			err = context.Cause(ctx)
+		}
+
+		return builtTransport{}, err
+	}
+	if err != nil {
+		cancel()
+
+		return builtTransport{}, err
+	}
+
+	built, err := rt.transportForProtocol(conn.ConnectionState().NegotiatedProtocol)
+	if err != nil {
+		_ = conn.Close()
+		return builtTransport{}, err
+	}
+
+	// Stash the connection just established for use servicing the
+	// actual request (should be near-immediate).
+	rt.stash(addr, conn)
+	built.stashed = conn
+
+	return built, nil
+}
+
+// handshake dials addr and runs the TLS handshake and the pin check on it.
+//
+// It holds no lock: dials used to run with rt's lock held, so every new
+// connection on the client, to any host, waited for every other handshake.
+func (rt *roundTripper) handshake(ctx context.Context, network, addr string) (*tls.UConn, error) {
 	if network == "tcp" && rt.disableIPV6 {
 		network = "tcp4"
 	}
@@ -536,50 +719,12 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 		return nil, err
 	}
 
-	negotiatedProtocol := conn.ConnectionState().NegotiatedProtocol
-	negotiatedKind := kindForProtocol(negotiatedProtocol)
+	return conn, nil
+}
 
-	// A reconnect belongs to a transport that already exists, so it never builds
-	// one: it either hands the connection back or reports that the connection is
-	// unusable.
-	//
-	// Servers do change their mind: an address behind a load balancer can offer
-	// http/1.1 on one connection and h2 on the next. Handing the new connection to
-	// the cached transport regardless means an HTTP/1 transport reading an HTTP/2
-	// SETTINGS frame as if it were a status line, which fails with a "malformed
-	// HTTP response" naming the raw frame bytes and keeps failing for that address
-	// until the whole client is thrown away.
-	//
-	// Neither case can be rescued here, because the dial belongs to the transport
-	// that speaks the wrong protocol and this function does not hold the lock that
-	// guards cachedTransports. Report it and let RoundTrip drop the entry and
-	// rebuild through getTransport.
-	if !setup {
-		cachedKind, ok := rt.cachedKind(addr)
-		switch {
-		case ok && cachedKind == negotiatedKind:
-			return conn, nil
-		case ok:
-			_ = conn.Close()
-
-			return nil, fmt.Errorf("%w: %s negotiated %q", errProtocolChanged, addr, negotiatedProtocol)
-		default:
-			// The entry was dropped while this transport was still in flight.
-			_ = conn.Close()
-
-			return nil, fmt.Errorf("%w: %s negotiated %q with no transport cached", errProtocolChanged, addr, negotiatedProtocol)
-		}
-	}
-
-	// The setup dial always builds, and deliberately does not consult
-	// cachedKinds. getTransport only calls it when no transport is cached, so
-	// there is nothing to reuse, and a kind left behind by a drop that has not
-	// finished would otherwise return the connection with a nil error, which
-	// getTransport panics on.
-	//
-	// No usable http.Transport for this address yet, create one based on the
-	// results of ALPN if no http1 is enforced.
-
+// transportForProtocol builds the transport that speaks negotiatedProtocol,
+// the result of ALPN on a setup dial.
+func (rt *roundTripper) transportForProtocol(negotiatedProtocol string) (builtTransport, error) {
 	switch negotiatedProtocol {
 	case http2.NextProtoTLS:
 		utlsConfig := &tls.Config{ClientSessionCache: rt.clientSessionCache, InsecureSkipVerify: rt.insecureSkipVerify, OmitEmptyPsk: true}
@@ -651,8 +796,8 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 		t2.Priorities = rt.priorities
 
 		t2.PushHandler = &http2.DefaultPushHandler{}
-		rt.cachedTransports[addr] = &t2
-		rt.setCachedKind(addr, transportHTTP2)
+
+		return builtTransport{transport: &t2, kind: transportHTTP2, hasKind: true}, nil
 	case http3.NextProtoH3:
 		t3, err := buildHTTP3Transport(&http3Config{
 			clientHelloId:          rt.clientHelloId,
@@ -668,26 +813,24 @@ func (rt *roundTripper) dialTLSWithSetup(ctx context.Context, network, addr stri
 			proxyURL:               rt.proxyURL,
 		})
 		if err != nil {
-			return nil, err
+			return builtTransport{}, err
 		}
-		rt.cachedTransports[addr] = t3
-		rt.setCachedKind(addr, transportHTTP3)
+
+		return builtTransport{transport: t3, kind: transportHTTP3, hasKind: true}, nil
 	default:
-		rt.cachedTransports[addr] = rt.buildHttp1Transport()
-		rt.setCachedKind(addr, transportHTTP1)
+		return builtTransport{transport: rt.buildHttp1Transport(), kind: transportHTTP1, hasKind: true}, nil
 	}
-
-	// Stash the connection just established for use servicing the
-	// actual request (should be near-immediate).
-	rt.cachedConnections[addr] = conn
-
-	return conn, errProtocolNegotiated
 }
 
 func (rt *roundTripper) dial(ctx context.Context, network, addr string) (net.Conn, error) {
 	if network == "tcp" && rt.disableIPV6 {
 		network = "tcp4"
 	}
+
+	if network == "tcp" && rt.disableIPV4 {
+		network = "tcp6"
+	}
+
 	return rt.dialer.DialContext(ctx, network, addr)
 }
 
@@ -732,8 +875,7 @@ func (rt *roundTripper) buildHttp1Transport() *http.Transport {
 // without a request context whenever it needs a new connection, and every
 // request for the address waits on that dial, past the client's timeout. So the
 // dial gets a deadline here; without one, a proxy that answers CONNECT and then
-// sends nothing stalls the handshake, which holds rt's lock, and with it every
-// later request on the client.
+// sends nothing stalls the handshake, and every request for the address with it.
 //
 // The context is cancelled only when the deadline passes, never after a dial
 // that finished in time. A tunnel through an HTTP/2 proxy is a stream that lives
@@ -899,6 +1041,7 @@ func newRoundTripper(clientProfile profiles.ClientProfile, transportOptions *Tra
 		cachedTransports:            make(map[string]http.RoundTripper),
 		cachedConnections:           make(map[string]net.Conn),
 		cachedKinds:                 make(map[string]transportKind),
+		pendingTransports:           make(map[string]chan struct{}),
 		disableIPV6:                 disableIPV6,
 		disableIPV4:                 disableIPV4,
 		bandwidthTracker:            bandwidthTracker,

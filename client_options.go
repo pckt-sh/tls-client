@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
@@ -86,6 +87,14 @@ type httpClientConfig struct {
 	badPinHandler      BadPinHandlerFunc
 	transportOptions   *TransportOptions
 	localAddr          *net.TCPAddr
+	// localAddrIPv6CIDRs are the networks every connection draws its local
+	// address from, and localAddrIPv6Prefixes what they parse to. See
+	// WithLocalAddrFromIPv6CIDRs.
+	localAddrIPv6CIDRs    []string
+	localAddrIPv6Prefixes []netip.Prefix
+	// dnsCache is where the client takes the addresses of hosts from. See
+	// WithDNSCache.
+	dnsCache *DNSCache
 
 	dialer             net.Dialer
 	dialContext        func(ctx context.Context, network, addr string) (net.Conn, error)

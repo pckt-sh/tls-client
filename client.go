@@ -63,7 +63,6 @@ type httpClient struct {
 	logger           Logger
 	bandwidthTracker bandwidth.BandwidthTracker
 	config           *httpClientConfig
-	headerLck        sync.Mutex
 	dialer           proxy.ContextDialer
 
 	preHooksLck  sync.RWMutex
@@ -107,6 +106,10 @@ func NewHttpClient(logger Logger, options ...HttpClientOption) (HttpClient, erro
 		return nil, err
 	}
 
+	if err := applyLocalAddrFromIPv6CIDRs(config); err != nil {
+		return nil, err
+	}
+
 	if config.debug {
 		if logger == nil {
 			logger = NewLogger()
@@ -130,7 +133,6 @@ func NewHttpClient(logger Logger, options ...HttpClientOption) (HttpClient, erro
 		Client:           *client,
 		logger:           logger,
 		config:           config,
-		headerLck:        sync.Mutex{},
 		bandwidthTracker: bandwidthTracker,
 		dialer:           dialer,
 		preHooksLck:      sync.RWMutex{},
@@ -215,10 +217,15 @@ func (c *customContextDialer) DialContext(ctx context.Context, network, addr str
 
 func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, proxy.ContextDialer, bandwidth.BandwidthTracker, profiles.ClientProfile, error) {
 	var dialer proxy.ContextDialer
-	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer)
+	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer, config.localAddrIPv6Prefixes, config.dnsCache)
 
 	if config.proxyUrl != "" && config.proxyDialerFactory == nil {
-		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, config.localAddr, config.dialer, config.connectHeaders, logger)
+		localAddr, err := config.proxyLocalAddr()
+		if err != nil {
+			return nil, nil, nil, profiles.ClientProfile{}, err
+		}
+
+		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, localAddr, config.dialer, config.connectHeaders, logger)
 		if err != nil {
 			return nil, nil, nil, profiles.ClientProfile{}, err
 		}
@@ -227,7 +234,12 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 	}
 
 	if config.proxyDialerFactory != nil {
-		proxyDialer, err := config.proxyDialerFactory(config.proxyUrl, config.timeout, config.localAddr, config.connectHeaders, logger)
+		localAddr, err := config.proxyLocalAddr()
+		if err != nil {
+			return nil, nil, nil, profiles.ClientProfile{}, err
+		}
+
+		proxyDialer, err := config.proxyDialerFactory(config.proxyUrl, config.timeout, localAddr, config.connectHeaders, logger)
 		if err != nil {
 			return nil, nil, nil, profiles.ClientProfile{}, err
 		}
@@ -385,12 +397,20 @@ func (c *httpClient) GetProxy() string {
 }
 
 func (c *httpClient) applyProxy() error {
+	// Without a proxy the client dials the way it did when it was built: a
+	// bare proxy.Direct would drop its timeout, its local address and its
+	// DNS cache the first time the proxy is changed.
 	var dialer proxy.ContextDialer
-	dialer = proxy.Direct
+	dialer = newDirectDialer(c.config.timeout, c.config.localAddr, c.config.dialer, c.config.localAddrIPv6Prefixes, c.config.dnsCache)
 
 	if c.config.proxyUrl != "" && c.config.proxyDialerFactory == nil {
 		c.logger.Debug("proxy url %s supplied - using proxy connect dialer", c.config.proxyUrl)
-		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, c.config.localAddr, c.config.dialer, c.config.connectHeaders, c.logger)
+		localAddr, err := c.config.proxyLocalAddr()
+		if err != nil {
+			return err
+		}
+
+		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, localAddr, c.config.dialer, c.config.connectHeaders, c.logger)
 		if err != nil {
 			c.logger.Error("failed to create proxy connect dialer: %s", err.Error())
 			return err
@@ -401,7 +421,12 @@ func (c *httpClient) applyProxy() error {
 
 	if c.config.proxyDialerFactory != nil {
 		c.logger.Debug("using custom proxy connect dialer")
-		proxyDialer, err := c.config.proxyDialerFactory(c.config.proxyUrl, c.config.timeout, c.config.localAddr, c.config.connectHeaders, c.logger)
+		localAddr, err := c.config.proxyLocalAddr()
+		if err != nil {
+			return err
+		}
+
+		proxyDialer, err := c.config.proxyDialerFactory(c.config.proxyUrl, c.config.timeout, localAddr, c.config.connectHeaders, c.logger)
 		if err != nil {
 			c.logger.Error("failed to create proxy connect dialer: %s", err.Error())
 			return err
@@ -421,14 +446,22 @@ func (c *httpClient) applyProxy() error {
 		return err
 	}
 
+	// The transport being replaced is never used again. Its idle connections
+	// would otherwise stay open until they time out, one batch for every proxy
+	// change. Requests still in flight on it are left alone.
+	previous := c.Transport
 	c.Transport = transport
+
+	if idler, ok := previous.(interface{ CloseIdleConnections() }); ok {
+		idler.CloseIdleConnections()
+	}
 
 	return nil
 }
 
 // GetCookies returns the cookies in the client's cookie jar for a given URL.
 func (c *httpClient) GetCookies(u *url.URL) []*http.Cookie {
-	c.logger.Debug(fmt.Sprintf("get cookies for url: %s", u.String()))
+	c.logger.Debug("get cookies for url: %s", u)
 	if c.Jar == nil {
 		c.logger.Warn("you did not setup a cookie jar")
 		return nil
@@ -439,7 +472,7 @@ func (c *httpClient) GetCookies(u *url.URL) []*http.Cookie {
 
 // SetCookies sets a list of cookies for a given URL in the client's cookie jar.
 func (c *httpClient) SetCookies(u *url.URL, cookies []*http.Cookie) {
-	c.logger.Debug(fmt.Sprintf("set cookies for url: %s", u.String()))
+	c.logger.Debug("set cookies for url: %s", u)
 
 	if c.Jar == nil {
 		c.logger.Warn("you did not setup a cookie jar")
@@ -598,14 +631,16 @@ func (c *httpClient) do(req *http.Request) (*http.Response, error) {
 	}
 
 	// Header order must be defined in all lowercase. On HTTP 1 people sometimes define them also in uppercase and then ordering does not work.
-	c.headerLck.Lock()
-
+	//
+	// Both only touch this request and read the default headers, which nothing
+	// writes after the client is built, so no lock is needed.
 	if len(req.Header) == 0 {
 		req.Header = c.config.defaultHeaders.Clone()
 	}
 
+	// Set even when absent: an empty order makes fhttp sort the headers by order
+	// rather than its default sort, and that difference is on the wire.
 	req.Header[http.HeaderOrderKey] = allToLower(req.Header[http.HeaderOrderKey])
-	c.headerLck.Unlock()
 
 	if c.config.debug {
 		debugReq := req.Clone(context.Background())
@@ -639,11 +674,13 @@ func (c *httpClient) do(req *http.Request) (*http.Response, error) {
 		return nil, err
 	}
 
+	// The cookie and URL arguments are only built if the logger formats them:
+	// parsing every Set-Cookie header for a no-op logger cost every request.
 	c.logger.Debug("headers on request:\n%v", req.Header)
-	c.logger.Debug("cookies on request:\n%v", resp.Request.Cookies())
+	c.logger.Debug("cookies on request:\n%v", lazyFormat(func() any { return resp.Request.Cookies() }))
 	c.logger.Debug("headers on response:\n%v", resp.Header)
-	c.logger.Debug("cookies on response:\n%v", resp.Cookies())
-	c.logger.Debug("requested %s : status %d", req.URL.String(), resp.StatusCode)
+	c.logger.Debug("cookies on response:\n%v", lazyFormat(func() any { return resp.Cookies() }))
+	c.logger.Debug("requested %s : status %d", req.URL, resp.StatusCode)
 
 	if c.config.debug {
 		responseBytes, err := httputil.DumpResponse(resp, resp.ContentLength > 0)
@@ -725,7 +762,29 @@ func (c *httpClient) Post(url, contentType string, body io.Reader) (resp *http.R
 	return c.Do(req)
 }
 
+// lazyFormat defers building a log argument until a logger formats it.
+type lazyFormat func() any
+
+func (f lazyFormat) String() string {
+	return fmt.Sprint(f())
+}
+
+// allToLower returns list with every element lowercased. A list that already is
+// comes back as is, without allocating; it is never modified in place, because
+// callers commonly share one order slice between requests.
 func allToLower(list []string) []string {
+	needed := false
+	for _, elem := range list {
+		if strings.ToLower(elem) != elem {
+			needed = true
+			break
+		}
+	}
+
+	if !needed {
+		return list
+	}
+
 	lower := make([]string, len(list))
 
 	for i, elem := range list {

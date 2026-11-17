@@ -201,7 +201,7 @@ func TestASetupDialClosesAStaleStash(t *testing.T) {
 	addr := srv.Listener.Addr().String()
 
 	tripper, err := newRoundTripper(profiles.Chrome_133, nil, "", true, false, false, true, false, false,
-		nil, nil, nil, false, false, bandwidth.NewNopeTracker(), "", 0, newDirectDialer(5*time.Second, nil, net.Dialer{}))
+		nil, nil, nil, false, false, bandwidth.NewNopeTracker(), "", 0, newDirectDialer(5*time.Second, nil, net.Dialer{}, nil, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
