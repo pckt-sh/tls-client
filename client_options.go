@@ -12,6 +12,7 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	tls "github.com/bogdanfinn/utls"
+	"github.com/pckt-sh/tls-client/bandwidth"
 	"github.com/pckt-sh/tls-client/profiles"
 	"golang.org/x/net/proxy"
 )
@@ -95,6 +96,12 @@ type httpClientConfig struct {
 	// dnsCache is where the client takes the addresses of hosts from. See
 	// WithDNSCache.
 	dnsCache *DNSCache
+	// dialAddrRewrite picks the address direct connections go to. See
+	// WithDialAddrRewrite.
+	dialAddrRewrite DialAddrRewrite
+	// bandwidthTracker, if not nil, is the tracker the client reports to. See
+	// WithCustomBandwidthTracker.
+	bandwidthTracker bandwidth.BandwidthTracker
 
 	dialer             net.Dialer
 	dialContext        func(ctx context.Context, network, addr string) (net.Conn, error)
@@ -383,6 +390,16 @@ func WithDisableIPV4() HttpClientOption {
 func WithBandwidthTracker() HttpClientOption {
 	return func(config *httpClientConfig) {
 		config.enabledBandwidthTracker = true
+	}
+}
+
+// WithCustomBandwidthTracker configures a client to report the bytes it writes
+// and reads to tracker, which may be shared by any number of clients: to feed
+// a metric, for example. It counts what goes over the connection, TLS
+// included, and takes the place of the tracker of WithBandwidthTracker.
+func WithCustomBandwidthTracker(tracker bandwidth.BandwidthTracker) HttpClientOption {
+	return func(config *httpClientConfig) {
+		config.bandwidthTracker = tracker
 	}
 }
 

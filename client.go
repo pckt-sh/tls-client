@@ -217,7 +217,7 @@ func (c *customContextDialer) DialContext(ctx context.Context, network, addr str
 
 func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, proxy.ContextDialer, bandwidth.BandwidthTracker, profiles.ClientProfile, error) {
 	var dialer proxy.ContextDialer
-	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer, config.localAddrIPv6Prefixes, config.dnsCache)
+	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer, config.localAddrIPv6Prefixes, config.dnsCache, config.dialAddrRewrite)
 
 	if config.proxyUrl != "" && config.proxyDialerFactory == nil {
 		localAddr, err := config.proxyLocalAddr()
@@ -267,7 +267,9 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 	}
 
 	var bandwidthTracker bandwidth.BandwidthTracker
-	if config.enabledBandwidthTracker {
+	if config.bandwidthTracker != nil {
+		bandwidthTracker = config.bandwidthTracker
+	} else if config.enabledBandwidthTracker {
 		bandwidthTracker = bandwidth.NewTracker()
 	} else {
 		bandwidthTracker = bandwidth.NewNopeTracker()
@@ -401,7 +403,7 @@ func (c *httpClient) applyProxy() error {
 	// bare proxy.Direct would drop its timeout, its local address and its
 	// DNS cache the first time the proxy is changed.
 	var dialer proxy.ContextDialer
-	dialer = newDirectDialer(c.config.timeout, c.config.localAddr, c.config.dialer, c.config.localAddrIPv6Prefixes, c.config.dnsCache)
+	dialer = newDirectDialer(c.config.timeout, c.config.localAddr, c.config.dialer, c.config.localAddrIPv6Prefixes, c.config.dnsCache, c.config.dialAddrRewrite)
 
 	if c.config.proxyUrl != "" && c.config.proxyDialerFactory == nil {
 		c.logger.Debug("proxy url %s supplied - using proxy connect dialer", c.config.proxyUrl)

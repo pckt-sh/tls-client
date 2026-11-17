@@ -33,9 +33,13 @@ type directDialer struct {
 
 	// dnsCache, if not nil, is where the addresses of a host come from.
 	dnsCache *DNSCache
+
+	// rewrite, if not nil, picks the address to connect to. See
+	// WithDialAddrRewrite.
+	rewrite DialAddrRewrite
 }
 
-func newDirectDialer(timeout time.Duration, localAddr *net.TCPAddr, _dialer net.Dialer, localPrefixes []netip.Prefix, dnsCache *DNSCache) proxy.ContextDialer {
+func newDirectDialer(timeout time.Duration, localAddr *net.TCPAddr, _dialer net.Dialer, localPrefixes []netip.Prefix, dnsCache *DNSCache, rewrite DialAddrRewrite) proxy.ContextDialer {
 	_dialer.Timeout = timeout
 	if nil != localAddr {
 		_dialer.LocalAddr = localAddr
@@ -45,6 +49,7 @@ func newDirectDialer(timeout time.Duration, localAddr *net.TCPAddr, _dialer net.
 		dialer:        _dialer,
 		localPrefixes: localPrefixes,
 		dnsCache:      dnsCache,
+		rewrite:       rewrite,
 	}
 }
 
@@ -56,6 +61,12 @@ func (d *directDialer) DialContext(ctx context.Context, network, addr string) (n
 	dialer, err := d.dialerForConn()
 	if err != nil {
 		return nil, err
+	}
+
+	if d.rewrite != nil {
+		if to := d.rewrite(addr); to != "" {
+			addr = to
+		}
 	}
 
 	if d.dnsCache != nil {
