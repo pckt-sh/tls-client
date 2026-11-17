@@ -1,7 +1,6 @@
 package tls_client
 
 import (
-	"fmt"
 	"net/url"
 	"strings"
 	"sync"
@@ -175,13 +174,14 @@ func (jar *cookieJar) GetAllCookies() map[string][]*http.Cookie {
 func (jar *cookieJar) buildCookieHostKey(u *url.URL) string {
 	host := u.Host
 
-	hostParts := strings.Split(host, ".")
-
-	switch len(hostParts) {
-	case 3:
-		return fmt.Sprintf("%s.%s", hostParts[len(hostParts)-2], hostParts[len(hostParts)-1])
+	// A host of two or three dot separated parts is keyed by its last two, any
+	// other by itself. This runs for every request and response, so it slices
+	// the host instead of splitting and joining it.
+	switch strings.Count(host, ".") {
+	case 1:
+		return host
 	case 2:
-		return fmt.Sprintf("%s.%s", hostParts[len(hostParts)-2], hostParts[len(hostParts)-1])
+		return host[strings.IndexByte(host, '.')+1:]
 	default:
 		return host
 	}
