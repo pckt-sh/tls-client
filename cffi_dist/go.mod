@@ -4,8 +4,8 @@ go 1.27
 
 require (
 	github.com/bogdanfinn/fhttp v0.7.3
-	github.com/bogdanfinn/tls-client v1.18.1
 	github.com/google/uuid v1.6.0
+	github.com/pckt-sh/tls-client v1.18.1
 )
 
 require (
@@ -24,3 +24,6 @@ require (
 	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.42.0 // indirect
 )
+
+// The library is built from the sources next to it.
+replace github.com/pckt-sh/tls-client => ../

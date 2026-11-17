@@ -7,8 +7,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/bogdanfinn/tls-client/trust_anchors"
 	tls "github.com/bogdanfinn/utls"
+	"github.com/pckt-sh/tls-client/trust_anchors"
 )
 
 // extensionTrustAnchors is the trust_anchors extension Chrome 144 and later

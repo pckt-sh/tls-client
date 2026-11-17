@@ -13,7 +13,7 @@ import (
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/tls-client/profiles"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 // silentListener accepts connections, reads whatever arrives and never answers.

@@ -1,9 +1,9 @@
 package tests
 
 import (
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
+	tls_client "github.com/pckt-sh/tls-client"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 type TlsApiResponse struct {

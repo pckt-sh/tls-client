@@ -10,9 +10,9 @@ import (
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
 	"github.com/bogdanfinn/websocket"
 	"github.com/google/uuid"
+	tls_client "github.com/pckt-sh/tls-client"
 )
 
 // wsConnections maps connectionId -> *wsConn.

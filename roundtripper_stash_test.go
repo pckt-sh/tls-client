@@ -12,8 +12,8 @@ import (
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/tls-client/bandwidth"
-	"github.com/bogdanfinn/tls-client/profiles"
+	"github.com/pckt-sh/tls-client/bandwidth"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 // stashTestServer starts a local TLS server answering "ok", over HTTP/2 if h2.

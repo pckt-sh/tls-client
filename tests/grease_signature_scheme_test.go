@@ -4,8 +4,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 // greaseSignatureSchemeProfiles are the profiles that send a GREASE value as

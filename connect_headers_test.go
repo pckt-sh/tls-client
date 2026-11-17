@@ -10,7 +10,7 @@ import (
 	"time"
 
 	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/tls-client/profiles"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 // Chrome 152 sends three headers on a CONNECT to an HTTP proxy, read off the

@@ -9,7 +9,7 @@ import (
 	"testing"
 
 	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
+	tls_client "github.com/pckt-sh/tls-client"
 )
 
 // isGreaseValue reports whether v is one of the 16 GREASE values defined in

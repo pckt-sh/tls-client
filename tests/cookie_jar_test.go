@@ -7,11 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/bogdanfinn/tls-client/profiles"
+	"github.com/pckt-sh/tls-client/profiles"
 
 	http "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/fhttp/httptest"
-	tls_client "github.com/bogdanfinn/tls-client"
+	tls_client "github.com/pckt-sh/tls-client"
 	"github.com/stretchr/testify/assert"
 )
 

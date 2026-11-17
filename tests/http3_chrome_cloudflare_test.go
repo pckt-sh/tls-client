@@ -6,8 +6,8 @@ import (
 	"testing"
 
 	http "github.com/bogdanfinn/fhttp"
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
+	tls_client "github.com/pckt-sh/tls-client"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 func TestHTTP3WithChromeOnCloudflare(t *testing.T) {

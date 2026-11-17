@@ -14,9 +14,9 @@ import (
 
 	http "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/fhttp/http2"
-	tls_client "github.com/bogdanfinn/tls-client"
-	"github.com/bogdanfinn/tls-client/profiles"
 	tls "github.com/bogdanfinn/utls"
+	tls_client "github.com/pckt-sh/tls-client"
+	"github.com/pckt-sh/tls-client/profiles"
 )
 
 // specFactory is called once per ClientHello, so anything that has to stay

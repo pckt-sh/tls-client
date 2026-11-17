@@ -2,8 +2,8 @@ package profiles
 
 import (
 	"github.com/bogdanfinn/fhttp/http2"
-	"github.com/bogdanfinn/tls-client/trust_anchors"
 	tls "github.com/bogdanfinn/utls"
+	"github.com/pckt-sh/tls-client/trust_anchors"
 )
 
 var DefaultClientProfile = Chrome_150

@@ -1,7 +1,7 @@
 package profiles
 
 import (
-	"github.com/bogdanfinn/tls-client/trust_anchors"
+	"github.com/pckt-sh/tls-client/trust_anchors"
 
 	"github.com/bogdanfinn/fhttp/http2"
 	tls "github.com/bogdanfinn/utls"
