@@ -150,3 +150,24 @@ func randomIPv6Addr(prefixes []netip.Prefix) (netip.Addr, error) {
 		return netip.AddrFrom16(addr), nil
 	}
 }
+
+// debugLoggerFor returns logger when debug is on, nil otherwise, so a dialer
+// only spends anything on logging in debug mode.
+func debugLoggerFor(debug bool, logger Logger) Logger {
+	if !debug {
+		return nil
+	}
+
+	return logger
+}
+
+// logProxyLocalAddr logs the local address drawn for the connections to a
+// proxy, if one was drawn from the configured IPv6 networks. It shows only
+// with WithDebug.
+func logProxyLocalAddr(logger Logger, localAddr *net.TCPAddr, drawn bool) {
+	if logger == nil || localAddr == nil || !drawn {
+		return
+	}
+
+	logger.Debug("connections to the proxy leave from %s", localAddr.IP)
+}

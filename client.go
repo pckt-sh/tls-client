@@ -217,13 +217,14 @@ func (c *customContextDialer) DialContext(ctx context.Context, network, addr str
 
 func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, proxy.ContextDialer, bandwidth.BandwidthTracker, profiles.ClientProfile, error) {
 	var dialer proxy.ContextDialer
-	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer, config.localAddrIPv6Prefixes, config.dnsCache, config.dialAddrRewrite)
+	dialer = newDirectDialer(config.timeout, config.localAddr, config.dialer, config.localAddrIPv6Prefixes, config.dnsCache, config.dialAddrRewrite, debugLoggerFor(config.debug, logger))
 
 	if config.proxyUrl != "" && config.proxyDialerFactory == nil {
 		localAddr, err := config.proxyLocalAddr()
 		if err != nil {
 			return nil, nil, nil, profiles.ClientProfile{}, err
 		}
+		logProxyLocalAddr(logger, localAddr, len(config.localAddrIPv6Prefixes) > 0)
 
 		proxyDialer, err := newConnectDialer(config.proxyUrl, config.timeout, localAddr, config.dialer, config.connectHeaders, logger)
 		if err != nil {
@@ -238,6 +239,7 @@ func buildFromConfig(logger Logger, config *httpClientConfig) (*http.Client, pro
 		if err != nil {
 			return nil, nil, nil, profiles.ClientProfile{}, err
 		}
+		logProxyLocalAddr(logger, localAddr, len(config.localAddrIPv6Prefixes) > 0)
 
 		proxyDialer, err := config.proxyDialerFactory(config.proxyUrl, config.timeout, localAddr, config.connectHeaders, logger)
 		if err != nil {
@@ -403,7 +405,7 @@ func (c *httpClient) applyProxy() error {
 	// bare proxy.Direct would drop its timeout, its local address and its
 	// DNS cache the first time the proxy is changed.
 	var dialer proxy.ContextDialer
-	dialer = newDirectDialer(c.config.timeout, c.config.localAddr, c.config.dialer, c.config.localAddrIPv6Prefixes, c.config.dnsCache, c.config.dialAddrRewrite)
+	dialer = newDirectDialer(c.config.timeout, c.config.localAddr, c.config.dialer, c.config.localAddrIPv6Prefixes, c.config.dnsCache, c.config.dialAddrRewrite, debugLoggerFor(c.config.debug, c.logger))
 
 	if c.config.proxyUrl != "" && c.config.proxyDialerFactory == nil {
 		c.logger.Debug("proxy url %s supplied - using proxy connect dialer", c.config.proxyUrl)
@@ -411,6 +413,7 @@ func (c *httpClient) applyProxy() error {
 		if err != nil {
 			return err
 		}
+		logProxyLocalAddr(c.logger, localAddr, len(c.config.localAddrIPv6Prefixes) > 0)
 
 		proxyDialer, err := newConnectDialer(c.config.proxyUrl, c.config.timeout, localAddr, c.config.dialer, c.config.connectHeaders, c.logger)
 		if err != nil {
@@ -427,6 +430,7 @@ func (c *httpClient) applyProxy() error {
 		if err != nil {
 			return err
 		}
+		logProxyLocalAddr(c.logger, localAddr, len(c.config.localAddrIPv6Prefixes) > 0)
 
 		proxyDialer, err := c.config.proxyDialerFactory(c.config.proxyUrl, c.config.timeout, localAddr, c.config.connectHeaders, c.logger)
 		if err != nil {
@@ -623,7 +627,7 @@ func (c *httpClient) do(req *http.Request) (*http.Response, error) {
 			err := recover()
 
 			if err != nil && c.config.debug {
-				c.logger.Debug(fmt.Sprintf("panic occurred in tls client request handling: %s", err))
+				c.logger.Debug("panic occurred in tls client request handling: %s", err)
 			}
 
 			if err != nil && !c.config.debug {

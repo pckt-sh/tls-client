@@ -3,11 +3,13 @@ package tls_client
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	stdhttp "net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -293,5 +295,64 @@ func TestLocalAddrFromIPv6CIDRsDialsIPv6Only(t *testing.T) {
 		default:
 			t.Errorf("%s: the request did not dial", url)
 		}
+	}
+}
+
+// recordingLogger keeps what is logged at debug level.
+type recordingLogger struct {
+	noopLogger
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *recordingLogger) Debug(format string, args ...any) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, fmt.Sprintf(format, args...))
+}
+
+// TestDebugLogsTheDrawnLocalAddr: in debug mode every connection says which
+// address it left from; otherwise nothing is logged.
+func TestDebugLogsTheDrawnLocalAddr(t *testing.T) {
+	listener, err := net.Listen("tcp6", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback: %v", err)
+	}
+	defer listener.Close()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	prefixes := []netip.Prefix{netip.MustParsePrefix("::1/128")}
+
+	logger := &recordingLogger{}
+	d := newDirectDialer(time.Second, nil, net.Dialer{}, prefixes, nil, nil, logger)
+	conn, err := d.(*directDialer).DialContext(context.Background(), "tcp6", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	if len(logger.lines) != 1 || !strings.Contains(logger.lines[0], "from [::1]:") {
+		t.Errorf("logged %q, want one line naming the local address", logger.lines)
+	}
+
+	quiet := &recordingLogger{}
+	d = newDirectDialer(time.Second, nil, net.Dialer{}, nil, nil, nil, quiet)
+	conn, err = d.(*directDialer).DialContext(context.Background(), "tcp6", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+
+	if len(quiet.lines) != 0 {
+		t.Errorf("without drawn local addresses it logged %q", quiet.lines)
 	}
 }

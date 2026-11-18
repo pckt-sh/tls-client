@@ -37,9 +37,13 @@ type directDialer struct {
 	// rewrite, if not nil, picks the address to connect to. See
 	// WithDialAddrRewrite.
 	rewrite DialAddrRewrite
+
+	// debugLogger, if not nil, is told the local address each connection
+	// drawn from localPrefixes leaves from. Set with WithDebug.
+	debugLogger Logger
 }
 
-func newDirectDialer(timeout time.Duration, localAddr *net.TCPAddr, _dialer net.Dialer, localPrefixes []netip.Prefix, dnsCache *DNSCache, rewrite DialAddrRewrite) proxy.ContextDialer {
+func newDirectDialer(timeout time.Duration, localAddr *net.TCPAddr, _dialer net.Dialer, localPrefixes []netip.Prefix, dnsCache *DNSCache, rewrite DialAddrRewrite, debugLogger Logger) proxy.ContextDialer {
 	_dialer.Timeout = timeout
 	if nil != localAddr {
 		_dialer.LocalAddr = localAddr
@@ -50,6 +54,7 @@ func newDirectDialer(timeout time.Duration, localAddr *net.TCPAddr, _dialer net.
 		localPrefixes: localPrefixes,
 		dnsCache:      dnsCache,
 		rewrite:       rewrite,
+		debugLogger:   debugLogger,
 	}
 }
 
@@ -63,17 +68,29 @@ func (d *directDialer) DialContext(ctx context.Context, network, addr string) (n
 		return nil, err
 	}
 
+	target := addr
 	if d.rewrite != nil {
 		if to := d.rewrite(addr); to != "" {
 			addr = to
 		}
 	}
 
+	var conn net.Conn
 	if d.dnsCache != nil {
-		return dialCached(ctx, dialer, d.dnsCache, network, addr)
+		conn, err = dialCached(ctx, dialer, d.dnsCache, network, addr)
+	} else {
+		conn, err = dialer.DialContext(ctx, network, addr)
 	}
 
-	return dialer.DialContext(ctx, network, addr)
+	if d.debugLogger != nil && len(d.localPrefixes) > 0 {
+		if err != nil {
+			d.debugLogger.Debug("dial %s from %s failed: %s", target, dialer.LocalAddr, err)
+		} else {
+			d.debugLogger.Debug("connected to %s (%s) from %s", target, conn.RemoteAddr(), conn.LocalAddr())
+		}
+	}
+
+	return conn, err
 }
 
 // dialerForConn returns the dialer to make one connection with. It is d's
